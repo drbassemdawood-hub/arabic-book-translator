@@ -1,0 +1,14 @@
+{
+  "name": "arabic-book-translator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Translate whole English books into Modern Standard Arabic with the Claude API — entirely in the browser.",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "cd test && npm install && python3 make_samples.py && node chunk_parity.mjs /tmp/chunk_cases.json && node e2e.mjs"
+  },
+  "dependencies": {
+    "jszip": "3.10.1",
+    "pdfjs-dist": "6.2.108"
+  }
+}

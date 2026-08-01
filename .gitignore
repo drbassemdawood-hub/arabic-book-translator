@@ -1,0 +1,8 @@
+node_modules/
+test/node_modules/
+test/artifacts/
+test/samples/
+dist/
+.DS_Store
+*.log
+.vercel

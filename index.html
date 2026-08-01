@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Book Translator — مترجم الكتب | English books → Arabic</title>
+<meta name="description" content="Translate whole English books (.txt, .docx, .epub, .pdf) into Modern Standard Arabic with your own Claude API key. Runs entirely in your browser — resumable, with Word and PDF output.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="vendor/jszip.min.js" defer></script>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="hero-title">
+      <h1>Book Translator</h1>
+      <p class="hero-arabic" lang="ar" dir="rtl">مُترجِم الكُتُب</p>
+    </div>
+    <p class="hero-sub">
+      Translate whole English books into elegant Modern Standard Arabic
+      (<span lang="ar" dir="rtl">الفصحى</span>) — right here in your browser.
+    </p>
+    <p class="hero-privacy">
+      🔒 Private by design: your API key and your book go straight from this page to Anthropic.
+      Nothing is uploaded to any other server.
+    </p>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="setup-card">
+
+    <!-- API key -->
+    <div class="field">
+      <label for="api-key">Claude API key</label>
+      <div class="row">
+        <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+        <button type="button" class="ghost-btn" id="toggle-key" title="Show / hide the key">👁</button>
+        <label class="check inline"><input type="checkbox" id="remember-key" checked> Remember</label>
+      </div>
+      <p class="hint">
+        Create a key at <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a> → API keys.
+        If “Remember” is on, the key is stored only in this browser.
+      </p>
+    </div>
+
+    <!-- book file -->
+    <div class="field">
+      <label>Book file</label>
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="Choose a book file or drag it here">
+        <input type="file" id="file-input" accept=".txt,.docx,.epub,.pdf" hidden>
+        <div class="dropzone-empty" id="dropzone-empty">
+          <span class="dropzone-icon">📚</span>
+          <span><strong>Choose a book</strong> or drag it here</span>
+          <span class="dropzone-types">.txt · .docx · .epub · .pdf</span>
+        </div>
+        <div class="dropzone-file" id="dropzone-file" hidden>
+          <span class="dropzone-icon">📖</span>
+          <span class="file-name" id="file-name"></span>
+          <span class="file-size" id="file-size"></span>
+          <button type="button" class="ghost-btn" id="clear-file" title="Remove file">✕</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- options -->
+    <div class="options-grid">
+      <div class="field">
+        <label for="model">Model</label>
+        <select id="model"></select>
+      </div>
+      <div class="field">
+        <label for="speed">Speed</label>
+        <select id="speed"></select>
+      </div>
+      <div class="field">
+        <label>Output format</label>
+        <div class="row wrap">
+          <label class="check"><input type="checkbox" id="fmt-docx" checked> Word (.docx)</label>
+          <label class="check"><input type="checkbox" id="fmt-txt"> Plain text (.txt)</label>
+          <span class="hint inline-hint">PDF: use “Print / Save as PDF” when done</span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="ocr">Scanned PDFs</label>
+        <select id="ocr"></select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" id="review" checked>
+        <strong>Two-pass review</strong> — re-check every passage against the source (best accuracy, ≈2× cost)
+      </label>
+    </div>
+
+    <!-- actions -->
+    <div class="actions">
+      <button type="button" class="primary-btn" id="start-btn">▶&nbsp; Start translation</button>
+      <button type="button" class="danger-btn" id="cancel-btn" disabled>■&nbsp; Cancel</button>
+      <span class="tip">Long book? Keep this tab open and stop your computer from sleeping.
+        If anything interrupts the run, press Start again — it resumes where it stopped.</span>
+    </div>
+
+    <!-- progress -->
+    <div class="progress-wrap" id="progress-wrap" hidden>
+      <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-text" id="status-text">Ready.</div>
+    </div>
+
+    <!-- results -->
+    <div class="results" id="results" hidden>
+      <h2>✅ Translation finished — تمّت الترجمة</h2>
+      <div class="row wrap">
+        <button type="button" class="primary-btn" id="dl-docx">⬇ Word (.docx)</button>
+        <button type="button" class="secondary-btn" id="dl-txt">⬇ Plain text (.txt)</button>
+        <button type="button" class="secondary-btn" id="dl-print">🖨 Print / Save as PDF</button>
+      </div>
+    </div>
+
+    <!-- log -->
+    <details class="log-wrap" id="log-wrap" open>
+      <summary>Activity log</summary>
+      <pre class="log" id="log" aria-live="polite"></pre>
+    </details>
+  </section>
+
+  <section class="notes">
+    <h2>How it works</h2>
+    <ul>
+      <li><strong>Costs come from your own Anthropic account.</strong> Before translating, the log shows an
+        estimated cost and time for the whole book. Rough guide with default settings (Opus, two-pass review):
+        a 300-page book ≈ $15–25; a 2000-page book ≈ $100–170. Turn off the review pass or choose Sonnet to cut this substantially.</li>
+      <li><strong>Interruptions never lose paid work.</strong> Progress is saved in your browser after every passage.
+        If you cancel, lose connection, or close the tab — press Start again with the same book and it resumes.</li>
+      <li><strong>Scanned PDFs</strong> (no text layer) are detected automatically and read with Claude vision OCR;
+        the estimated OCR cost is shown first, and results are cached per page.</li>
+      <li><strong>Careful speed</strong> translates one passage at a time, feeding each passage the previous Arabic
+        text — best consistency of names and style. Fast/Fastest run 3 or 6 passages in parallel
+        (needs an API rate-limit tier that allows it).</li>
+      <li>Translated books are for your personal use — respect the copyright of the original work.</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>
+    Book Translator — <span lang="ar" dir="rtl">مترجم الكتب</span> ·
+    <a id="github-link" href="https://github.com/" target="_blank" rel="noopener">Source on GitHub</a> ·
+    Built with the <a href="https://platform.claude.com" target="_blank" rel="noopener">Claude API</a>
+  </p>
+</footer>
+
+<!-- resume modal -->
+<div class="modal-backdrop" id="resume-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="resume-title">
+    <h3 id="resume-title">Resume previous run?</h3>
+    <p id="resume-text"></p>
+    <div class="row end">
+      <button type="button" class="secondary-btn" id="resume-no">Start over</button>
+      <button type="button" class="primary-btn" id="resume-yes">Resume</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
