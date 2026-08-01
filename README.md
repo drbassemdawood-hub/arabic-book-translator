@@ -45,7 +45,7 @@ this substantially.
 It's a static site — any web server works:
 
 ```bash
-git clone https://github.com/bassemdawood/arabic-book-translator.git
+git clone https://github.com/drbassemdawood-hub/arabic-book-translator.git
 cd arabic-book-translator
 python3 -m http.server 8000
 # open http://localhost:8000
