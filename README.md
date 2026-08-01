@@ -15,8 +15,9 @@ novel.
 There is no backend. This is a static page: your API key and your book go
 straight from your browser to `api.anthropic.com` and nowhere else.
 
-- The API key is stored (if "Remember" is checked) only in your browser's
-  local storage.
+- The API key is entered once (🔑 API key button) and — if "Remember" is
+  checked — stored only in your browser's local storage, so it's filled in
+  automatically on your next visit.
 - Translation progress is saved in your browser (IndexedDB) after **every
   passage** — if you cancel, lose connection, or close the tab, press **Start**
   again with the same book and it resumes where it stopped, never re-paying
@@ -28,7 +29,7 @@ straight from your browser to `api.anthropic.com` and nowhere else.
 |---|---|
 | **Model** | *Claude Opus* (default) gives the best literary quality. *Sonnet* is cheaper and faster; *Haiku* is cheapest. |
 | **Speed** | *Careful* translates one passage at a time and feeds each passage the previous Arabic text — best consistency of names and style. *Fast/Fastest* run 3 or 6 passages in parallel (needs an API rate-limit tier that allows it). |
-| **Output** | Word (.docx) fully Arabic right-to-left formatted, and/or plain text (.txt). For PDF, use the **Print / Save as PDF** button — the browser's own text engine renders perfect Arabic ligatures. |
+| **Output** | Word (.docx) and PDF (.pdf), both fully Arabic right-to-left formatted, and/or plain text (.txt). A browser Print view is also available as an alternative way to make a PDF. |
 | **Two-pass review** | After translating each passage, a second model call re-checks the draft against the English source and corrects omissions, mistranslations, and inconsistent names. Best accuracy; roughly doubles cost and time. On by default. |
 | **Scanned PDFs (OCR)** | Pages with no text layer are detected automatically and read with Claude vision OCR (the estimated cost is shown first). OCR results are cached per page, so interruptions never redo OCR work. |
 
@@ -71,6 +72,14 @@ import the repository and deploy, or `npx vercel` from the project folder.
   `vendor/` so the site is fully self-contained.
 - Arabic Word output is generated in the browser (OOXML with `bidi`
   right-to-left paragraphs).
+- Arabic PDF output is generated in the browser with
+  [jsPDF](https://github.com/parallax/jsPDF) and the embedded
+  [Amiri](https://www.amirifont.org/) font (SIL OFL): contextual letter
+  shaping ([arabic-reshaper](https://github.com/louy/Javascript-Arabic-Reshaper))
+  plus the full Unicode bidirectional algorithm
+  ([bidi-js](https://github.com/lojjic/bidi-js)), verified glyph-by-glyph
+  against the reference Python implementations (`test/artext_parity.mjs`,
+  `test/validate_pdf.py`).
 - Resume state lives in IndexedDB, keyed by a SHA-256 fingerprint of the
   extracted text, so state from a different book or an edited source is never
   reused.

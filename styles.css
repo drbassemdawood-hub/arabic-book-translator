@@ -217,7 +217,9 @@ button:active:not(:disabled) { transform: translateY(1px); }
   margin: 22px 0 6px;
 }
 
-.tip { font-size: 0.82rem; color: var(--ink-soft); max-width: 44ch; }
+.tip { font-size: 0.82rem; color: var(--ink-soft); }
+p.tip { margin: 10px 0 0; }
+.modal input[type="password"], .modal input[type="text"] { width: 100%; }
 
 /* ---------------------------------------------------------------- progress */
 

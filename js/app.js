@@ -5,20 +5,22 @@ import {
 } from "./engine.js";
 import { SUPPORTED_EXTENSIONS, fileExtension } from "./extract.js";
 import { loadSettings, saveSettings, loadApiKey, saveApiKey } from "./state.js";
-import { buildDocxBlob, buildTxtBlob, downloadBlob, openPrintView } from "./output.js";
+import { buildDocxBlob, buildPdfBlob, buildTxtBlob, downloadBlob, openPrintView } from "./output.js";
 
 const $ = (id) => document.getElementById(id);
 
 const el = {
   apiKey: $("api-key"), toggleKey: $("toggle-key"), rememberKey: $("remember-key"),
+  keyModal: $("key-modal"), openKey: $("open-key"), keySave: $("key-save"),
+  keyClose: $("key-close"), keyStatus: $("key-status"),
   dropzone: $("dropzone"), fileInput: $("file-input"),
   dropEmpty: $("dropzone-empty"), dropFile: $("dropzone-file"),
   fileName: $("file-name"), fileSize: $("file-size"), clearFile: $("clear-file"),
   model: $("model"), speed: $("speed"), ocr: $("ocr"),
-  fmtDocx: $("fmt-docx"), fmtTxt: $("fmt-txt"), review: $("review"),
+  fmtDocx: $("fmt-docx"), fmtPdf: $("fmt-pdf"), fmtTxt: $("fmt-txt"), review: $("review"),
   startBtn: $("start-btn"), cancelBtn: $("cancel-btn"),
   progressWrap: $("progress-wrap"), progressFill: $("progress-fill"), statusText: $("status-text"),
-  results: $("results"), dlDocx: $("dl-docx"), dlTxt: $("dl-txt"), dlPrint: $("dl-print"),
+  results: $("results"), dlDocx: $("dl-docx"), dlPdf: $("dl-pdf"), dlTxt: $("dl-txt"), dlPrint: $("dl-print"),
   log: $("log"), logWrap: $("log-wrap"),
   resumeModal: $("resume-modal"), resumeText: $("resume-text"),
   resumeYes: $("resume-yes"), resumeNo: $("resume-no"),
@@ -55,6 +57,7 @@ function restoreSettings() {
   if (s.ocr && s.ocr in OCR_MODES) el.ocr.value = s.ocr;
   if (Array.isArray(s.formats)) {
     el.fmtDocx.checked = s.formats.includes("docx");
+    el.fmtPdf.checked = s.formats.includes("pdf");
     el.fmtTxt.checked = s.formats.includes("txt");
   }
   if (typeof s.review === "boolean") el.review.checked = s.review;
@@ -77,15 +80,51 @@ function persistSettings() {
 function selectedFormats() {
   const formats = [];
   if (el.fmtDocx.checked) formats.push("docx");
+  if (el.fmtPdf.checked) formats.push("pdf");
   if (el.fmtTxt.checked) formats.push("txt");
   return formats;
 }
 
 restoreSettings();
 
+// ------------------------------------------------------------ API key modal
+
+let startAfterKeySave = false;
+
+function updateKeyStatus() {
+  const hasKey = !!el.apiKey.value.trim();
+  el.keyStatus.textContent = hasKey
+    ? (el.rememberKey.checked ? "API key saved ✓" : "API key set for this session ✓")
+    : "No API key yet — you'll be asked when you start.";
+}
+
+function openKeyModal(forStart = false) {
+  startAfterKeySave = forStart;
+  el.keyModal.hidden = false;
+  el.apiKey.focus();
+}
+
+function closeKeyModal() {
+  el.keyModal.hidden = true;
+  updateKeyStatus();
+}
+
+el.openKey.addEventListener("click", () => openKeyModal(false));
+el.keyClose.addEventListener("click", closeKeyModal);
+el.keySave.addEventListener("click", () => {
+  saveApiKey(el.apiKey.value.trim(), el.rememberKey.checked);
+  closeKeyModal();
+  if (startAfterKeySave && el.apiKey.value.trim()) {
+    startAfterKeySave = false;
+    start();
+  }
+});
+
 el.toggleKey.addEventListener("click", () => {
   el.apiKey.type = el.apiKey.type === "password" ? "text" : "password";
 });
+
+updateKeyStatus();
 
 // --------------------------------------------------------------- file input
 
@@ -181,7 +220,8 @@ function setRunning(state) {
   running = state;
   el.startBtn.disabled = state;
   el.cancelBtn.disabled = !state;
-  for (const input of [el.apiKey, el.model, el.speed, el.ocr, el.fmtDocx, el.fmtTxt, el.review]) {
+  for (const input of [el.openKey, el.model, el.speed, el.ocr,
+                       el.fmtDocx, el.fmtPdf, el.fmtTxt, el.review]) {
     input.disabled = state;
   }
 }
@@ -196,8 +236,8 @@ window.addEventListener("beforeunload", (e) => {
 async function start() {
   const apiKey = el.apiKey.value.trim();
   if (!apiKey) {
-    showToast("Enter your Claude API key first — get one at platform.claude.com.");
-    el.apiKey.focus();
+    showToast("Enter your Claude API key first — it stays in this browser.");
+    openKeyModal(true);
     return;
   }
   if (!chosenFile) {
@@ -207,7 +247,7 @@ async function start() {
   if (!selectedFormats().length) {
     // formats only control auto-download (the result buttons offer everything),
     // but keep parity with the desktop app: require at least one.
-    showToast("Choose at least one output format (Word or plain text).");
+    showToast("Choose at least one output format (Word, PDF, or plain text).");
     return;
   }
 
@@ -270,6 +310,10 @@ async function start() {
   // auto-download the chosen formats (buttons remain as a fallback)
   try {
     if (formats.includes("docx")) downloadBlob(await buildDocxBlob(outcome.translated, stem), `${stem}.ar.docx`);
+    if (formats.includes("pdf")) {
+      appendLog("Writing the PDF … (a large book can take a few minutes)");
+      downloadBlob(await buildPdfBlob(outcome.translated, stem), `${stem}.ar.pdf`);
+    }
     if (formats.includes("txt")) downloadBlob(buildTxtBlob(outcome.translated), `${stem}.ar.txt`);
   } catch (err) {
     appendLog(`⚠ Could not auto-download: ${err.message}. Use the buttons below.`);
@@ -289,6 +333,19 @@ el.cancelBtn.addEventListener("click", cancel);
 el.dlDocx.addEventListener("click", async () => {
   if (!lastResult) return;
   downloadBlob(await buildDocxBlob(lastResult.translated, lastResult.stem), `${lastResult.stem}.ar.docx`);
+});
+el.dlPdf.addEventListener("click", async () => {
+  if (!lastResult) return;
+  el.dlPdf.disabled = true;
+  el.dlPdf.textContent = "⏳ Building PDF…";
+  try {
+    downloadBlob(await buildPdfBlob(lastResult.translated, lastResult.stem), `${lastResult.stem}.ar.pdf`);
+  } catch (err) {
+    showToast(`Could not build the PDF: ${err.message}`);
+  } finally {
+    el.dlPdf.disabled = false;
+    el.dlPdf.textContent = "⬇ PDF (.pdf)";
+  }
 });
 el.dlTxt.addEventListener("click", () => {
   if (!lastResult) return;

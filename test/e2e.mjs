@@ -120,7 +120,10 @@ function makeMock() {
     // Arabic output with the same paragraph count as the source passage
     const passage = String(content).split(/Translate (?:ONLY the following passage|this passage):\n\n/).pop();
     const nPars = passage.split("\n\n").filter((p) => p.trim()).length || 1;
-    const arabic = Array.from({ length: nPars }, (_, i) => `فقرة مترجمة رقم ${i + 1} — نصٌ عربيّ تجريبي.`).join("\n\n");
+    const arabic = Array.from({ length: nPars }, (_, i) =>
+      i === 1
+        ? `فقرة مترجمة رقم ${i + 1} فيها اسم أجنبي Baker Street 221 وسط النص العربي.`
+        : `فقرة مترجمة رقم ${i + 1} — نصٌ عربيّ تجريبي.`).join("\n\n");
     await route.fulfill({
       status: 200, headers: cors, contentType: "text/event-stream",
       body: sse(isReview ? `${arabic} (مراجَعة)` : arabic),
@@ -140,12 +143,15 @@ async function newPage(browser, mock) {
   return { context, page };
 }
 
-async function setup(page, file, { review = false, txt = false, speed = null } = {}) {
+async function setup(page, file, { review = false, txt = false, pdf = false, speed = null } = {}) {
+  await page.click("#open-key");
   await page.fill("#api-key", "sk-ant-mock-key");
+  await page.click("#key-save");
   await page.setInputFiles("#file-input", file);
   if (!review) await page.uncheck("#review");
   else await page.check("#review");
   if (txt) await page.check("#fmt-txt");
+  if (!pdf) await page.uncheck("#fmt-pdf");
   if (speed) await page.selectOption("#speed", speed);
 }
 
@@ -171,12 +177,29 @@ async function idbCounts(page) {
 const browser = await chromium.launch().catch(() =>
   chromium.launch({ executablePath: "/opt/pw-browsers/chromium" }));
 
-// ================================================================ flow 1: txt
-console.log("\nFlow 1 — .txt book, two-pass review, docx+txt downloads");
+// ====================================================== flow 0: key modal UX
+console.log("\nFlow 0 — API key lives in a modal, not on the page");
 {
   const mock = makeMock();
   const { context, page } = await newPage(browser, mock);
-  await setup(page, join(SAMPLES, "sample.txt"), { review: true, txt: true });
+  check("key input hidden on load", !(await page.isVisible("#api-key")));
+  await page.setInputFiles("#file-input", join(SAMPLES, "sample.txt"));
+  await page.click("#start-btn");
+  check("start without key opens the key modal", await page.isVisible("#key-modal"));
+  await page.fill("#api-key", "sk-ant-mock-key");
+  await page.click("#key-save");
+  // saving from that modal auto-continues the start
+  await doneLog(page);
+  check("run continued automatically after saving the key", true);
+  await context.close();
+}
+
+// ================================================================ flow 1: txt
+console.log("\nFlow 1 — .txt book, two-pass review, docx+pdf+txt downloads");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample.txt"), { review: true, txt: true, pdf: true });
 
   const downloads = [];
   page.on("download", (d) => downloads.push(d));
@@ -191,11 +214,14 @@ console.log("\nFlow 1 — .txt book, two-pass review, docx+txt downloads");
   check("estimate in log", /Estimated size .* rough cost/.test(log));
   check("source reached the API", mock.sources[0].includes("ancient") || mock.sources[0].includes("library"));
 
-  await page.waitForTimeout(700);
-  check("auto-downloads fired (docx+txt)", downloads.length === 2, `got ${downloads.length}`);
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Writing the PDF"),
+    null, { timeout: 20000 });
+  await page.waitForTimeout(2500); // let the pdf build + downloads land
+  check("auto-downloads fired (docx+pdf+txt)", downloads.length === 3, `got ${downloads.length}`);
   for (const d of downloads) {
     await d.saveAs(join(ARTIFACTS, d.suggestedFilename()));
   }
+  check("pdf among downloads", downloads.some((d) => d.suggestedFilename().endsWith(".ar.pdf")));
 
   // manual download buttons too
   const [docxDl] = await Promise.all([page.waitForEvent("download"), page.click("#dl-docx")]);

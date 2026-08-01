@@ -34,20 +34,6 @@
 <main>
   <section class="card" id="setup-card">
 
-    <!-- API key -->
-    <div class="field">
-      <label for="api-key">Claude API key</label>
-      <div class="row">
-        <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
-        <button type="button" class="ghost-btn" id="toggle-key" title="Show / hide the key">👁</button>
-        <label class="check inline"><input type="checkbox" id="remember-key" checked> Remember</label>
-      </div>
-      <p class="hint">
-        Create a key at <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a> → API keys.
-        If “Remember” is on, the key is stored only in this browser.
-      </p>
-    </div>
-
     <!-- book file -->
     <div class="field">
       <label>Book file</label>
@@ -82,8 +68,8 @@
         <label>Output format</label>
         <div class="row wrap">
           <label class="check"><input type="checkbox" id="fmt-docx" checked> Word (.docx)</label>
+          <label class="check"><input type="checkbox" id="fmt-pdf" checked> PDF (.pdf)</label>
           <label class="check"><input type="checkbox" id="fmt-txt"> Plain text (.txt)</label>
-          <span class="hint inline-hint">PDF: use “Print / Save as PDF” when done</span>
         </div>
       </div>
       <div class="field">
@@ -103,9 +89,11 @@
     <div class="actions">
       <button type="button" class="primary-btn" id="start-btn">▶&nbsp; Start translation</button>
       <button type="button" class="danger-btn" id="cancel-btn" disabled>■&nbsp; Cancel</button>
-      <span class="tip">Long book? Keep this tab open and stop your computer from sleeping.
-        If anything interrupts the run, press Start again — it resumes where it stopped.</span>
+      <button type="button" class="ghost-btn" id="open-key">🔑 API key</button>
+      <span class="hint" id="key-status"></span>
     </div>
+    <p class="tip">Long book? Keep this tab open and stop your computer from sleeping.
+      If anything interrupts the run, press Start again — it resumes where it stopped.</p>
 
     <!-- progress -->
     <div class="progress-wrap" id="progress-wrap" hidden>
@@ -118,8 +106,9 @@
       <h2>✅ Translation finished — تمّت الترجمة</h2>
       <div class="row wrap">
         <button type="button" class="primary-btn" id="dl-docx">⬇ Word (.docx)</button>
+        <button type="button" class="primary-btn" id="dl-pdf">⬇ PDF (.pdf)</button>
         <button type="button" class="secondary-btn" id="dl-txt">⬇ Plain text (.txt)</button>
-        <button type="button" class="secondary-btn" id="dl-print">🖨 Print / Save as PDF</button>
+        <button type="button" class="secondary-btn" id="dl-print">🖨 Print view</button>
       </div>
     </div>
 
@@ -155,6 +144,24 @@
     Built with the <a href="https://platform.claude.com" target="_blank" rel="noopener">Claude API</a>
   </p>
 </footer>
+
+<!-- API key modal -->
+<div class="modal-backdrop" id="key-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="key-title">
+    <h3 id="key-title">🔑 Claude API key</h3>
+    <p>Create a key at <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a> → API keys.
+      It stays in this browser and is sent only to Anthropic — never to any other server.</p>
+    <div class="row" style="margin-bottom:12px">
+      <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+      <button type="button" class="ghost-btn" id="toggle-key" title="Show / hide the key">👁</button>
+    </div>
+    <label class="check" style="margin-bottom:16px"><input type="checkbox" id="remember-key" checked> Remember on this device</label>
+    <div class="row end">
+      <button type="button" class="secondary-btn" id="key-close">Close</button>
+      <button type="button" class="primary-btn" id="key-save">Save key</button>
+    </div>
+  </div>
+</div>
 
 <!-- resume modal -->
 <div class="modal-backdrop" id="resume-modal" hidden>

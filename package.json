@@ -5,9 +5,12 @@
   "description": "Translate whole English books into Modern Standard Arabic with the Claude API — entirely in the browser.",
   "scripts": {
     "build": "node build.mjs",
-    "test": "cd test && npm install && python3 make_samples.py && node chunk_parity.mjs /tmp/chunk_cases.json && node e2e.mjs"
+    "test": "cd test && npm install && python3 make_samples.py && python3 chunk_parity.py /tmp/chunk_cases.json && node chunk_parity.mjs /tmp/chunk_cases.json && python3 gen_artext_oracle.py && node artext_parity.mjs && node e2e.mjs && python3 validate_pdf.py"
   },
   "dependencies": {
+    "arabic-reshaper": "1.1.0",
+    "bidi-js": "1.0.3",
+    "jspdf": "4.2.1",
     "jszip": "3.10.1",
     "pdfjs-dist": "6.2.108"
   }

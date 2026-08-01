@@ -78,6 +78,136 @@ export async function buildDocxBlob(translatedChunks, title) {
   });
 }
 
+// ------------------------------------------------------------------------- pdf
+
+import { makeArabicLayout } from "./artext.js";
+
+function loadScript(src, ready) {
+  return new Promise((resolve, reject) => {
+    const done = ready();
+    if (done) return resolve(done);
+    const s = document.createElement("script");
+    s.src = new URL(src, document.baseURI).href;
+    s.onload = () => resolve(ready());
+    s.onerror = () => reject(new Error(`Could not load ${src}.`));
+    document.head.appendChild(s);
+  });
+}
+
+let jsPdfPromise = null;
+function loadJsPdf() {
+  if (!jsPdfPromise) {
+    jsPdfPromise = loadScript("vendor/jspdf.umd.min.js", () => window.jspdf?.jsPDF).then((JsPDF) => {
+      // Disable jsPDF's own Arabic pass (shaping-only, naive punctuation
+      // handling) — we pre-shape and run the full Unicode bidi algorithm
+      // ourselves, so the text we hand jsPDF is already in final visual form.
+      // Identify the built-in pass BEHAVIORALLY (function identities are not
+      // reliable in the minified build): probe each text hook with joining
+      // Arabic letters and drop whichever hook transforms them.
+      const PROBE = "بتث"; // بتث — changes under shaping/reordering
+      JsPDF.API.events = JsPDF.API.events.filter(([name, fn]) => {
+        if (name !== "preProcessText" && name !== "postProcessText") return true;
+        try {
+          const payload = { text: PROBE, x: 0, y: 0, options: {}, mutex: {} };
+          fn.call(null, payload);
+          return payload.text === PROBE; // keep hooks that leave Arabic alone
+        } catch {
+          return true; // hooks needing full document context are not the parser
+        }
+      });
+      return JsPDF;
+    });
+  }
+  return jsPdfPromise;
+}
+
+let reshaperPromise = null;
+function loadReshaper() {
+  if (!reshaperPromise) {
+    reshaperPromise = loadScript("vendor/arabic-reshaper.js", () => window.ArabicReshaper);
+  }
+  return reshaperPromise;
+}
+
+let bidiPromise = null;
+function loadBidi() {
+  if (!bidiPromise) {
+    bidiPromise = import(new URL("vendor/bidi.min.mjs", document.baseURI).href)
+      .then((m) => (m.default || m)());
+  }
+  return bidiPromise;
+}
+
+let amiriPromise = null;
+function loadAmiriBase64() {
+  if (!amiriPromise) {
+    amiriPromise = (async () => {
+      const resp = await fetch(new URL("vendor/Amiri-Regular.ttf", document.baseURI).href);
+      if (!resp.ok) throw new Error("Could not load the Arabic font for the PDF.");
+      const buf = new Uint8Array(await resp.arrayBuffer());
+      let binary = "";
+      const CHUNK = 0x8000;
+      for (let o = 0; o < buf.length; o += CHUNK) {
+        binary += String.fromCharCode.apply(null, buf.subarray(o, o + CHUNK));
+      }
+      return btoa(binary);
+    })();
+  }
+  return amiriPromise;
+}
+
+/** Real Arabic .pdf, generated in the browser: embedded Amiri font, contextual
+ * letter shaping + full Unicode bidi (verified against the reference Python
+ * implementations), RTL right-aligned layout — same page geometry as the
+ * desktop app (A4, 18 mm margins, 20 pt title, 13 pt body). */
+export async function buildPdfBlob(translatedChunks, title) {
+  const [JsPDF, reshaper, bidi, amiri] = await Promise.all([
+    loadJsPdf(), loadReshaper(), loadBidi(), loadAmiriBase64(),
+  ]);
+  const doc = new JsPDF({ unit: "mm", format: "a4", compress: true });
+  doc.addFileToVFS("Amiri-Regular.ttf", amiri);
+  doc.addFont("Amiri-Regular.ttf", "Amiri", "normal");
+  doc.setFont("Amiri", "normal");
+
+  const layout = makeArabicLayout({
+    reshape: (s) => reshaper.convertArabic(s),
+    bidi,
+    measure: (s) => doc.getTextWidth(s), // uses the active font + size
+  });
+
+  const MARGIN = 18;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const usableW = pageW - 2 * MARGIN;
+  const PT = 0.352778; // mm per point
+  let y = MARGIN;
+
+  const writePar = (par, { points, center = false, spacingAfter }) => {
+    doc.setFontSize(points);
+    const lineH = points * PT * 1.65;
+    const { rtl, lines } = layout.layoutParagraph(par, usableW);
+    for (const line of lines) {
+      if (y + lineH > pageH - MARGIN) {
+        doc.addPage();
+        y = MARGIN;
+      }
+      y += lineH;
+      if (center) doc.text(line, pageW / 2, y, { align: "center" });
+      else if (rtl) doc.text(line, pageW - MARGIN, y, { align: "right" });
+      else doc.text(line, MARGIN, y, { align: "left" });
+    }
+    y += spacingAfter;
+  };
+
+  writePar(title, { points: 20, center: true, spacingAfter: 6 });
+  for (const par of toParagraphs(translatedChunks)) {
+    // paragraphs kept in English (safety-refusal fallback) flow left-to-right
+    writePar(par, { points: 13, spacingAfter: 3 });
+  }
+
+  return doc.output("blob");
+}
+
 // ------------------------------------------------------------------------- txt
 
 export function buildTxtBlob(translatedChunks) {

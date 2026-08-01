@@ -10,6 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "arabic-reshaper": "^1.1.0",
+    "bidi-js": "^1.0.3",
     "playwright": "^1.62.1"
   }
 }

@@ -22,6 +22,10 @@ const VENDOR = [
   ["node_modules/pdfjs-dist/legacy/build/pdf.min.mjs", "pdf.min.mjs"],
   ["node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs", "pdf.worker.min.mjs"],
   ["node_modules/jszip/dist/jszip.min.js", "jszip.min.js"],
+  ["node_modules/jspdf/dist/jspdf.umd.min.js", "jspdf.umd.min.js"],
+  ["node_modules/bidi-js/dist/bidi.min.mjs", "bidi.min.mjs"],
+  ["node_modules/arabic-reshaper/index.js", "arabic-reshaper.js"],
+  ["vendor/Amiri-Regular.ttf", "Amiri-Regular.ttf"], // committed (SIL OFL)
 ];
 for (const [src, name] of VENDOR) {
   const from = existsSync(join(ROOT, src)) ? join(ROOT, src) : join(ROOT, "vendor", name);
