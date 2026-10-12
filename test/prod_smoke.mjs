@@ -10,7 +10,13 @@ const check = (name, cond, extra = "") => {
   else { failed++; console.log(`  FAIL ${name} ${extra}`); }
 };
 
-const browser = await chromium.launch().catch(() => chromium.launch({ executablePath: "/opt/pw-browsers/chromium" }));
+async function launchBrowser() { // Playwright's Chromium, else Edge/Chrome on the machine
+  for (const opts of [{}, { channel: "msedge" }, { channel: "chrome" }, { executablePath: "/opt/pw-browsers/chromium" }]) {
+    try { return await chromium.launch(opts); } catch { /* next */ }
+  }
+  throw new Error("No Chromium-based browser available.");
+}
+const browser = await launchBrowser();
 const context = await browser.newContext({ acceptDownloads: true });
 const page = await context.newPage();
 const failures = [];
@@ -34,9 +40,17 @@ const resp = await page.goto(SITE, { waitUntil: "networkidle" });
 check("site loads (HTTP 200)", resp.status() === 200, String(resp.status()));
 check("title correct", (await page.title()).includes("Book Translator"));
 check("GitHub link points to repo", (await page.getAttribute("#github-link", "href")).includes("drbassemdawood-hub/arabic-book-translator"));
+const pairs = await page.$$eval("#pair option", (os) => os.map((o) => o.value));
+check("language menu offers the 8 directions", pairs.join(",") === "en-ar,ar-en,ar-uk,uk-ar,ar-zh,zh-ar,ar-de,de-ar", pairs.join(","));
+for (const font of ["NotoSerif-Regular.ttf", "NotoSerifSC-Regular.ttf", "FONTS-LICENSE.txt"]) {
+  const r = await page.request.get(`${SITE}/vendor/${font}`);
+  check(`vendor/${font} deployed`, r.ok(), String(r.status()));
+}
 
 // full mocked run on the live site — proves js/ + vendor/ all deployed correctly
+await page.click("#open-key");
 await page.fill("#api-key", "sk-ant-smoke");
+await page.click("#key-save");
 await page.setInputFiles("#file-input", join(SAMPLES, "sample.pdf")); // PDF exercises vendored pdf.js + worker
 await page.uncheck("#review");
 const downloads = [];

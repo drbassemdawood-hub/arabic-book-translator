@@ -1,5 +1,8 @@
 """Generate the bidi/shaping oracle with the reference Python implementations."""
 import json
+import os
+import tempfile
+
 import arabic_reshaper
 from bidi.algorithm import get_display
 
@@ -25,6 +28,6 @@ CASES = [
 ]
 resh = arabic_reshaper.ArabicReshaper({"delete_harakat": False, "support_ligatures": True})
 out = [{"src": s, "py_shaped": resh.reshape(s), "py_visual": get_display(resh.reshape(s), base_dir="R")} for s in CASES]
-with open("/tmp/artext_oracle.json", "w", encoding="utf-8") as f:
+with open(os.path.join(tempfile.gettempdir(), "artext_oracle.json"), "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False)
 print(f"{len(out)} oracle cases written")

@@ -2,10 +2,10 @@
   "name": "arabic-book-translator",
   "version": "1.0.0",
   "private": true,
-  "description": "Translate whole English books into Modern Standard Arabic with the Claude API — entirely in the browser.",
+  "description": "Translate whole books between Arabic and English, Ukrainian, Chinese (Mandarin) or German with the Claude API — entirely in the browser.",
   "scripts": {
     "build": "node build.mjs",
-    "test": "cd test && npm install && python3 make_samples.py && python3 chunk_parity.py /tmp/chunk_cases.json && node chunk_parity.mjs /tmp/chunk_cases.json && python3 gen_artext_oracle.py && node artext_parity.mjs && node e2e.mjs && python3 validate_pdf.py"
+    "test": "cd test && npm install && python3 make_samples.py && node multilang_unit.mjs && python3 chunk_parity.py /tmp/chunk_cases.json && node chunk_parity.mjs /tmp/chunk_cases.json && python3 gen_artext_oracle.py && node artext_parity.mjs && node e2e.mjs && python3 validate_pdf.py && python3 validate_multilang.py"
   },
   "dependencies": {
     "arabic-reshaper": "1.1.0",

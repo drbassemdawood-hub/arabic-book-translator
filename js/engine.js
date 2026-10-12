@@ -1,13 +1,18 @@
 /* The translation engine — a faithful port of the desktop app's
- * TranslationEngine: chunked streaming requests, sequential mode with Arabic
- * context continuity, parallel mode, two-pass review, Claude vision OCR for
- * scanned PDF pages, cost estimate, and resume-safe progress persistence.
+ * TranslationEngine: chunked streaming requests, sequential mode with
+ * translated-text context continuity, parallel mode, two-pass review, Claude
+ * vision OCR for scanned PDF pages, cost estimate, and resume-safe progress
+ * persistence — for every supported language pair.
  */
 
 import { callModel, countTokens, imageContent, RefusalError, CancelledError, ApiError } from "./api.js";
-import { chunkText, CHUNK_MAX_CHARS } from "./chunk.js";
+import { chunkText } from "./chunk.js";
 import { extractSimple, openPdf, joinPdfPages, fileExtension } from "./extract.js";
-import { ProgressStore, fingerprintText, fingerprintFile } from "./state.js";
+import { ProgressStore, fingerprintText, fingerprintFile, translationJobsFor } from "./state.js";
+import {
+  DEFAULT_PAIR, parsePair, translationPrompt, reviewPrompt, reviewLabels, ocrPrompt, outputTokenRatio,
+} from "./languages.js";
+import { sourceMismatch, textLayerLooksBroken, religiousContext } from "./detect.js";
 
 // model id -> [label, $/M input, $/M output]
 export const MODELS = {
@@ -34,51 +39,51 @@ const SECONDS_PER_CHUNK = 50; // rough, for the up-front time estimate
 const TOKEN_SAMPLE_CHARS = 150000; // cost estimate samples this much, then extrapolates
 const OCR_MAX_EDGE = 1500; // px long edge sent to Claude vision
 
-const SYSTEM_PROMPT = `You are an expert literary translator translating an English book into Arabic.
+/** Arabic presentation forms (common in text pulled from PDFs and old files)
+ * → standard Arabic letters, so the model reads normal Arabic. */
+function normalizeSource(text, src) {
+  if (src !== "ar") return text;
+  return text.replace(/[ﭐ-﷿ﹰ-﻾]+/g, (s) => s.normalize("NFKC"));
+}
 
-Rules:
-- Translate into clear, elegant Modern Standard Arabic (الفصحى).
-- Preserve the author's tone, register, imagery, and literary devices. Translate meaning, not word-for-word.
-- Transliterate proper names (people, places) into Arabic script and keep them consistent throughout.
-- Keep chapter titles and headings as headings, translated.
-- Preserve paragraph breaks exactly: each source paragraph becomes one Arabic paragraph.
-- Dialogue keeps its quotation structure using Arabic-appropriate punctuation.
-- Do NOT summarize, omit, or add anything. Do NOT add translator notes or commentary.
-- Output ONLY the Arabic translation of the text you are given — no preamble, no explanations.
-`;
-
-const REVIEW_SYSTEM_PROMPT = `You are a meticulous bilingual editor reviewing an Arabic translation of an English book passage.
-
-Compare the draft translation against the English source, sentence by sentence, and produce a corrected final version. Fix:
-- any omitted, added, or mistranslated content — every sentence of the source must be fully represented;
-- misread idioms, false friends, and errors of meaning;
-- inconsistent transliteration of names;
-- awkward or unnatural Arabic phrasing (the result must read as elegant الفصحى);
-- broken paragraph structure — the paragraph breaks must match the source exactly.
-
-If the draft is already correct, keep it. Output ONLY the final corrected Arabic translation — no notes, no explanations, no preamble.
-`;
-
-const OCR_SYSTEM_PROMPT = `You transcribe scanned book pages exactly.
-
-- Output the complete text of the page precisely as printed — do not translate, summarize, correct, or modernize it.
-- Preserve paragraph breaks: put a blank line between paragraphs. Join words that are hyphen-split across lines.
-- Skip page headers, footers, and bare page numbers.
-- If the page contains no text at all, output exactly [BLANK].
-- Output ONLY the transcription — no commentary, no preamble.
-`;
-
-const UNTRANSLATED_MARKER = "[لم يُترجَم هذا المقطع تلقائيًا — النص الأصلي أدناه]";
+/** The book's language does not match the chosen language pair. */
+export class LanguageMismatchError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "LanguageMismatchError";
+  }
+}
 
 /**
  * ui callbacks: { log(msg), status(msg), progress(done, total),
- *                 askResume(done, total) -> Promise<bool>, isCancelled() -> bool }
+ *                 askResume(done, total) -> Promise<bool>,
+ *                 confirmLanguage(looksLike, chosenSource) -> Promise<bool>,
+ *                 isCancelled() -> bool }
  */
 export class TranslationEngine {
   constructor(ui) {
     this.ui = ui;
     this.refusalCount = 0;
     this.ocrCache = null;
+    this.setPair(DEFAULT_PAIR);
+  }
+
+  /** `religion`: the book's religious context (Arabic sources), which fixes
+   * how الله, honorifics and prophets' names are rendered in every passage. */
+  setPair(pair, religion = null) {
+    const { src, tgt, source, target } = parsePair(pair);
+    this.pair = pair;
+    this.src = src;
+    this.tgt = tgt;
+    this.source = source;
+    this.target = target;
+    this.religion = religion;
+    this.prompts = {
+      translate: translationPrompt(pair, { religion }),
+      review: reviewPrompt(pair, { religion }),
+      reviewLabels: reviewLabels(pair),
+      ocr: ocrPrompt(src),
+    };
   }
 
   log(msg) {
@@ -104,25 +109,26 @@ export class TranslationEngine {
         `this passage read:\n…${contextTail}\n\nTranslate ONLY the following passage:\n\n${chunk}`
       : `Translate this passage:\n\n${chunk}`;
 
-    let arabic;
+    let translated;
     try {
-      arabic = await this.call(apiKey, model, SYSTEM_PROMPT, content);
+      translated = await this.call(apiKey, model, this.prompts.translate, content);
     } catch (err) {
       if (err instanceof RefusalError) {
         // one declined passage must not wedge a 2000-page run: keep the
-        // original English, flag it, and keep going
+        // original text, flag it, and keep going
         this.refusalCount += 1;
-        this.log("  ⚠ passage declined by the safety filter — keeping the original English text for this passage");
-        return `${UNTRANSLATED_MARKER}\n\n${chunk}`;
+        this.log(`  ⚠ passage declined by the safety filter — keeping the original ${this.source.name} text for this passage`);
+        return `${this.target.marker}\n\n${chunk}`;
       }
       throw err;
     }
 
     if (review) {
+      const labels = this.prompts.reviewLabels;
       try {
-        arabic = await this.call(
-          apiKey, model, REVIEW_SYSTEM_PROMPT,
-          `ENGLISH SOURCE:\n\n${chunk}\n\n---\n\nDRAFT ARABIC TRANSLATION:\n\n${arabic}`,
+        translated = await this.call(
+          apiKey, model, this.prompts.review,
+          `${labels.source}:\n\n${chunk}\n\n---\n\n${labels.draft}:\n\n${translated}`,
         );
       } catch (err) {
         if (err instanceof RefusalError) {
@@ -135,14 +141,14 @@ export class TranslationEngine {
 
     // completeness guard: paragraph structure should survive translation
     const srcPars = chunk.split("\n\n").filter((p) => p.trim()).length;
-    const outPars = arabic.split("\n\n").filter((p) => p.trim()).length;
+    const outPars = translated.split("\n\n").filter((p) => p.trim()).length;
     if (srcPars > 3 && Math.abs(srcPars - outPars) > Math.max(2, Math.floor(srcPars / 5))) {
       this.log(
         `  ⚠ paragraph count differs (source ${srcPars}, translation ${outPars}) — ` +
         "worth spot-checking this passage"
       );
     }
-    return arabic;
+    return translated;
   }
 
   // ----------------------------------------------------------- cost estimate
@@ -152,7 +158,7 @@ export class TranslationEngine {
       const sample = text.slice(0, TOKEN_SAMPLE_CHARS);
       const sampleTokens = await countTokens(apiKey, model, sample);
       const inTok = Math.floor((sampleTokens * text.length) / sample.length);
-      const outTok = Math.floor(inTok * 1.4); // Arabic usually expands
+      const outTok = Math.floor(inTok * outputTokenRatio(this.pair)); // e.g. Arabic output expands
       const [, pIn, pOut] = MODELS[model];
       let cost = (inTok / 1e6) * pIn + (outTok / 1e6) * pOut;
       let perChunk = SECONDS_PER_CHUNK;
@@ -177,7 +183,7 @@ export class TranslationEngine {
   async claudeOcrPage(apiKey, model, pngBase64) {
     let text;
     try {
-      text = await this.call(apiKey, model, OCR_SYSTEM_PROMPT,
+      text = await this.call(apiKey, model, this.prompts.ocr,
         imageContent(pngBase64, "Transcribe this scanned book page."));
     } catch (err) {
       if (err instanceof RefusalError) {
@@ -190,18 +196,44 @@ export class TranslationEngine {
   }
 
   async extractPdf(apiKey, model, workers, ocrMode, file) {
-    const pdf = await openPdf(file);
+    const pdf = await openPdf(file, this.src);
     try {
-      const { numPages, pageTexts, scannedPages } = pdf;
+      const { numPages, pageTexts } = pdf;
+      // pages with a text layer that decodes to gibberish (wrong character
+      // mapping — common in Arabic PDFs) are read from their image, like scans
+      const brokenPages = [];
+      for (let i = 0; i < numPages; i++) {
+        if (!pdf.scannedPages.includes(i) && textLayerLooksBroken(pageTexts[i], this.src)) brokenPages.push(i);
+      }
+      const scannedPages = [...pdf.scannedPages, ...brokenPages].sort((a, b) => a - b);
 
+      // Before paying for any OCR, check the readable text layer against the
+      // chosen source language — a wrong language pair must cost nothing.
+      // Only when that layer is a real share of the book: a scan with one
+      // digital page (e.g. an English library notice) says nothing about its
+      // language — the full check after OCR still runs before translation.
+      const readable = numPages - scannedPages.length;
+      if (scannedPages.length && readable >= Math.max(3, numPages * 0.2)) {
+        const layer = pageTexts.filter((_, i) => !scannedPages.includes(i)).join("\n");
+        const looksLike = sourceMismatch(layer, this.src);
+        if (looksLike) await this.confirmSource(looksLike);
+      }
+
+      if (brokenPages.length) {
+        this.log(
+          `${brokenPages.length} of ${numPages} pages have a corrupted text layer (it decodes to gibberish, ` +
+          "a common fault in PDFs) — " + (ocrMode === "off" ? "they need OCR to be read." : "they will be read with OCR.")
+        );
+      }
       if (scannedPages.length && ocrMode === "off") {
         this.log(
-          `⚠ ${scannedPages.length} of ${numPages} pages look scanned (no text layer) ` +
+          `⚠ ${scannedPages.length} of ${numPages} pages need OCR (scanned or corrupted text) ` +
           "but OCR is off — those pages will be skipped."
         );
+        for (const i of brokenPages) pageTexts[i] = ""; // never translate gibberish
       } else if (scannedPages.length) {
         this.log(
-          `${scannedPages.length} of ${numPages} pages have no text layer — running OCR (Claude vision).`
+          `${scannedPages.length} of ${numPages} pages need OCR — running OCR (Claude vision).`
         );
         const fp = await fingerprintFile(file);
         const cache = new ProgressStore(`ocr:${fp}`, {
@@ -259,7 +291,7 @@ export class TranslationEngine {
         }
       }
 
-      return joinPdfPages(pageTexts);
+      return joinPdfPages(pageTexts, this.src);
     } finally {
       pdf.destroy();
     }
@@ -268,17 +300,17 @@ export class TranslationEngine {
   // ------------------------------------------------------------------- runs
 
   async runSequential(apiKey, model, chunks, done, state, review) {
-    // One request at a time; each passage sees the previous ARABIC tail,
-    // which gives the best name/style continuity.
+    // One request at a time; each passage sees the tail of the previous
+    // TRANSLATED passage, which gives the best name/style continuity.
     const total = chunks.length;
     for (let i = 0; i < total; i++) {
       if (i in done) continue;
       this.checkCancel();
       this.log(`Translating passage ${i + 1}/${total} …`);
       const tail = i ? (done[i - 1] || "").slice(-400) : "";
-      const arabic = await this.translateChunk(apiKey, model, chunks[i], tail, review);
-      done[i] = arabic;
-      await state.append(i, arabic);
+      const translated = await this.translateChunk(apiKey, model, chunks[i], tail, review);
+      done[i] = translated;
+      await state.append(i, translated);
       this.ui.progress(Object.keys(done).length, total);
     }
   }
@@ -302,9 +334,9 @@ export class TranslationEngine {
         if (idx >= todo.length) return;
         const i = todo[idx];
         try {
-          const arabic = await this.translateChunk(apiKey, model, chunks[i], srcTail(i), review);
-          done[i] = arabic;
-          await state.append(i, arabic);
+          const translated = await this.translateChunk(apiKey, model, chunks[i], srcTail(i), review);
+          done[i] = translated;
+          await state.append(i, translated);
           this.log(`Passage ${i + 1}/${total} translated.`);
           this.ui.progress(Object.keys(done).length, total);
         } catch (err) {
@@ -325,10 +357,28 @@ export class TranslationEngine {
    * or null if cancelled (progress stays saved for resume).
    * Throws Error with a user-friendly message on failure.
    */
-  async run({ apiKey, model, workers, review, ocrMode, file }) {
+  /** The book looks like `looksLike`, not the chosen source: ask; stop unless confirmed. */
+  async confirmSource(looksLike) {
+    this.log(`⚠ This book looks like ${looksLike}, but the chosen direction translates from ${this.source.name}.`);
+    const goOn = this.ui.confirmLanguage
+      ? await this.ui.confirmLanguage(looksLike, this.source.name)
+      : false;
+    if (!goOn) {
+      throw new LanguageMismatchError(
+        `Stopped before translating: the book looks like ${looksLike}, not ${this.source.name}. ` +
+        "Choose the matching language pair and press Start again."
+      );
+    }
+    this.languageConfirmed = true;
+    this.log("Continuing at your request.");
+  }
+
+  async run({ apiKey, model, workers, review, ocrMode, file, pair = DEFAULT_PAIR }) {
     this.refusalCount = 0;
     this.ocrCache = null;
+    this.languageConfirmed = false;
     try {
+      this.setPair(pair);
       return await this._run(apiKey, model, workers, review, ocrMode, file);
     } catch (err) {
       if (err instanceof CancelledError) {
@@ -341,23 +391,55 @@ export class TranslationEngine {
 
   async _run(apiKey, model, workers, review, ocrMode, file) {
     const ext = fileExtension(file.name);
-    this.log(`Reading ${file.name} …`);
-    const text = ext === ".pdf"
+    this.log(`Reading ${file.name} (${this.source.name} → ${this.target.name}) …`);
+    let text = ext === ".pdf"
       ? await this.extractPdf(apiKey, model, workers, ocrMode, file)
-      : await extractSimple(file);
+      : await extractSimple(file, this.source.legacyEncoding);
+    text = normalizeSource(text, this.src);
     if (!text.trim()) throw new Error("No text could be extracted from this file.");
-    this.log(`Extracted ${text.length.toLocaleString()} characters (~${Math.floor(text.length / 2000).toLocaleString()} pages).`);
+    const pages = Math.floor(text.length / this.source.charsPerPage);
+    this.log(`Extracted ${text.length.toLocaleString()} characters (~${pages.toLocaleString()} pages).`);
 
-    const chunks = chunkText(text);
+    // A wrong language choice would be billed for nothing — check before any
+    // translation request is made (unless already confirmed before OCR).
+    if (!this.languageConfirmed) {
+      const looksLike = sourceMismatch(text, this.src);
+      if (looksLike) await this.confirmSource(looksLike);
+    }
+
+    // One convention for الله and the honorifics across the whole book —
+    // each passage is translated on its own and cannot judge the book.
+    if (this.src === "ar") {
+      const religion = religiousContext(text);
+      this.setPair(this.pair, religion);
+      this.log({
+        islamic: "This reads as an Islamic religious work — Islamic terminology will be used throughout.",
+        christian: "This reads as a Christian work — Christian terminology will be used throughout.",
+        general: "Religious terms (God, honorific formulas) will be rendered the same way throughout the book.",
+      }[religion]);
+    }
+
+    const limit = this.source.chunkLimit;
+    const chunks = chunkText(text, limit);
     const total = chunks.length;
-    this.log(`Split into ${total} passages of ~${CHUNK_MAX_CHARS.toLocaleString()} characters.`);
+    this.log(`Split into ${total} passages of ~${limit.toLocaleString()} characters.`);
 
     await this.estimate(apiKey, model, text, total, workers, review);
 
+    // Progress is keyed by the text AND the language pair — the same book in
+    // another direction is a different job. English → Arabic keeps the key
+    // it had before other pairs existed, so runs in progress still resume.
     const fp = await fingerprintText(text);
-    const state = new ProgressStore(`tr:${fp}`, {
-      source: file.name, nChunks: total, fingerprint: fp,
-    });
+    const legacy = this.pair === "en-ar";
+    // (the religious convention is part of the job: passages translated under
+    // another one are never mixed in)
+    const state = new ProgressStore(
+      legacy ? `tr:${fp}` : `tr:${fp}:${this.pair}`,
+      legacy
+        ? { source: file.name, nChunks: total, fingerprint: fp }
+        : { source: file.name, nChunks: total, fingerprint: fp, pair: this.pair,
+          ...(this.religion ? { religion: this.religion } : {}) },
+    );
     let done = await state.load();
     const doneCount = Object.keys(done).length;
     if (doneCount && doneCount < total) {
@@ -382,13 +464,17 @@ export class TranslationEngine {
     for (let i = 0; i < total; i++) translated.push(done[i]);
     if (this.refusalCount) {
       this.log(
-        `⚠ ${this.refusalCount} passage(s) were declined by the safety filter and kept in English — ` +
-        "search the output for 'لم يُترجَم' to review them."
+        `⚠ ${this.refusalCount} passage(s) were declined by the safety filter and kept in ` +
+        `${this.source.name} — search the output for '${this.target.markerSearch}' to review them.`
       );
     }
 
     await state.delete();
-    if (this.ocrCache) await this.ocrCache.delete();
+    // The OCR cache belongs to the FILE, a job to the text AND the pair: a job
+    // in another direction for this book still needs the same OCR text to
+    // resume (a new OCR run reads slightly differently → a new fingerprint →
+    // its paid passages would be orphaned). Delete it once no such job is left.
+    if (this.ocrCache && !(await translationJobsFor(fp))) await this.ocrCache.delete();
     this.log("Translation complete. الحمد لله!");
     return { translated };
   }

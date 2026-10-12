@@ -6,6 +6,7 @@ import {
 import { SUPPORTED_EXTENSIONS, fileExtension } from "./extract.js";
 import { loadSettings, saveSettings, loadApiKey, saveApiKey } from "./state.js";
 import { buildDocxBlob, buildPdfBlob, buildTxtBlob, downloadBlob, openPrintView } from "./output.js";
+import { PAIRS, DEFAULT_PAIR, pairLabel, parsePair } from "./languages.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,7 +17,7 @@ const el = {
   dropzone: $("dropzone"), fileInput: $("file-input"),
   dropEmpty: $("dropzone-empty"), dropFile: $("dropzone-file"),
   fileName: $("file-name"), fileSize: $("file-size"), clearFile: $("clear-file"),
-  model: $("model"), speed: $("speed"), ocr: $("ocr"),
+  pair: $("pair"), model: $("model"), speed: $("speed"), ocr: $("ocr"),
   fmtDocx: $("fmt-docx"), fmtPdf: $("fmt-pdf"), fmtTxt: $("fmt-txt"), review: $("review"),
   startBtn: $("start-btn"), cancelBtn: $("cancel-btn"),
   progressWrap: $("progress-wrap"), progressFill: $("progress-fill"), statusText: $("status-text"),
@@ -24,6 +25,7 @@ const el = {
   log: $("log"), logWrap: $("log-wrap"),
   resumeModal: $("resume-modal"), resumeText: $("resume-text"),
   resumeYes: $("resume-yes"), resumeNo: $("resume-no"),
+  langModal: $("lang-modal"), langText: $("lang-text"), langYes: $("lang-yes"), langNo: $("lang-no"),
   toast: $("toast"),
 };
 
@@ -39,6 +41,13 @@ function fillSelect(select, labels, defaultLabel) {
   select.value = defaultLabel;
 }
 
+for (const pair of PAIRS) { // value = pair id ("en-ar"), text = "English → Arabic"
+  const opt = document.createElement("option");
+  opt.value = pair;
+  opt.textContent = pairLabel(pair);
+  el.pair.appendChild(opt);
+}
+el.pair.value = DEFAULT_PAIR;
 fillSelect(el.model, Object.values(MODELS).map(([label]) => label), MODELS[DEFAULT_MODEL][0]);
 fillSelect(el.speed, Object.keys(SPEEDS), DEFAULT_SPEED);
 fillSelect(el.ocr, Object.keys(OCR_MODES), DEFAULT_OCR);
@@ -52,6 +61,7 @@ function selectedModel() {
 
 function restoreSettings() {
   const s = loadSettings();
+  if (s.pair && PAIRS.includes(s.pair)) el.pair.value = s.pair;
   if (s.model && MODELS[s.model]) el.model.value = MODELS[s.model][0];
   if (s.speed && s.speed in SPEEDS) el.speed.value = s.speed;
   if (s.ocr && s.ocr in OCR_MODES) el.ocr.value = s.ocr;
@@ -67,6 +77,7 @@ function restoreSettings() {
 
 function persistSettings() {
   saveSettings({
+    pair: el.pair.value,
     model: selectedModel(),
     speed: el.speed.value,
     ocr: el.ocr.value,
@@ -210,20 +221,43 @@ function askResume(done, total) {
   });
 }
 
+/** The book does not look like the chosen source language: translate anyway? */
+function confirmLanguage(looksLike, chosenSource) {
+  return new Promise((resolve) => {
+    el.langText.textContent =
+      `This book looks like ${looksLike}, but the chosen direction translates from ${chosenSource}. ` +
+      "Nothing has been sent for translation yet. Stop and choose the matching language pair, " +
+      "or translate anyway if you are sure.";
+    el.langModal.hidden = false;
+    const finish = (answer) => {
+      el.langModal.hidden = true;
+      el.langYes.onclick = el.langNo.onclick = null;
+      resolve(answer);
+    };
+    el.langYes.onclick = () => finish(true);
+    el.langNo.onclick = () => finish(false);
+  });
+}
+
 // --------------------------------------------------------------------- run
 
 let running = false;
 let cancelled = false;
-let lastResult = null; // { translated, stem }
+let lastResult = null; // { translated, stem, tgt }
 
 function setRunning(state) {
   running = state;
   el.startBtn.disabled = state;
   el.cancelBtn.disabled = !state;
-  for (const input of [el.openKey, el.model, el.speed, el.ocr,
+  for (const input of [el.openKey, el.pair, el.model, el.speed, el.ocr,
                        el.fmtDocx, el.fmtPdf, el.fmtTxt, el.review]) {
     input.disabled = state;
   }
+}
+
+/** PDF problems worth telling the user about (e.g. characters no font can draw). */
+function pdfOptions() {
+  return { onWarning: (msg) => { appendLog(`⚠ ${msg}`); showToast(msg); } };
 }
 
 window.addEventListener("beforeunload", (e) => {
@@ -260,6 +294,8 @@ async function start() {
   el.statusText.textContent = "Starting…";
   setRunning(true);
 
+  const pair = el.pair.value;
+  const { tgt } = parsePair(pair);
   const model = selectedModel();
   const workers = SPEEDS[el.speed.value];
   const review = el.review.checked;
@@ -267,7 +303,7 @@ async function start() {
   const formats = selectedFormats();
 
   appendLog(
-    `--- Starting: ${chosenFile.name} → Arabic (${model}, ${workers} parallel, ` +
+    `--- Starting: ${chosenFile.name}, ${pairLabel(pair)} (${model}, ${workers} parallel, ` +
     `formats: ${formats.join(", ")}${review ? ", two-pass accuracy review" : ""}) ---`
   );
 
@@ -280,12 +316,13 @@ async function start() {
       el.statusText.textContent = `${done}/${total} passages translated and saved`;
     },
     askResume,
+    confirmLanguage,
     isCancelled: () => cancelled,
   });
 
   let outcome = null;
   try {
-    outcome = await engine.run({ apiKey, model, workers, review, ocrMode, file: chosenFile });
+    outcome = await engine.run({ apiKey, model, workers, review, ocrMode, file: chosenFile, pair });
   } catch (err) {
     appendLog(`✖ ${err.message}`);
     el.statusText.textContent = "Failed.";
@@ -301,7 +338,7 @@ async function start() {
   }
 
   const stem = chosenFile.name.replace(/\.[^.]+$/, "");
-  lastResult = { translated: outcome.translated, stem };
+  lastResult = { translated: outcome.translated, stem, tgt };
   el.statusText.textContent = "Done.";
   el.results.hidden = false;
   el.results.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -309,12 +346,14 @@ async function start() {
 
   // auto-download the chosen formats (buttons remain as a fallback)
   try {
-    if (formats.includes("docx")) downloadBlob(await buildDocxBlob(outcome.translated, stem), `${stem}.ar.docx`);
+    if (formats.includes("docx")) {
+      downloadBlob(await buildDocxBlob(outcome.translated, stem, tgt), `${stem}.${tgt}.docx`);
+    }
     if (formats.includes("pdf")) {
       appendLog("Writing the PDF … (a large book can take a few minutes)");
-      downloadBlob(await buildPdfBlob(outcome.translated, stem), `${stem}.ar.pdf`);
+      downloadBlob(await buildPdfBlob(outcome.translated, stem, tgt, pdfOptions()), `${stem}.${tgt}.pdf`);
     }
-    if (formats.includes("txt")) downloadBlob(buildTxtBlob(outcome.translated), `${stem}.ar.txt`);
+    if (formats.includes("txt")) downloadBlob(buildTxtBlob(outcome.translated), `${stem}.${tgt}.txt`);
   } catch (err) {
     appendLog(`⚠ Could not auto-download: ${err.message}. Use the buttons below.`);
   }
@@ -332,14 +371,16 @@ el.cancelBtn.addEventListener("click", cancel);
 
 el.dlDocx.addEventListener("click", async () => {
   if (!lastResult) return;
-  downloadBlob(await buildDocxBlob(lastResult.translated, lastResult.stem), `${lastResult.stem}.ar.docx`);
+  const { translated, stem, tgt } = lastResult;
+  downloadBlob(await buildDocxBlob(translated, stem, tgt), `${stem}.${tgt}.docx`);
 });
 el.dlPdf.addEventListener("click", async () => {
   if (!lastResult) return;
+  const { translated, stem, tgt } = lastResult;
   el.dlPdf.disabled = true;
   el.dlPdf.textContent = "⏳ Building PDF…";
   try {
-    downloadBlob(await buildPdfBlob(lastResult.translated, lastResult.stem), `${lastResult.stem}.ar.pdf`);
+    downloadBlob(await buildPdfBlob(translated, stem, tgt, pdfOptions()), `${stem}.${tgt}.pdf`);
   } catch (err) {
     showToast(`Could not build the PDF: ${err.message}`);
   } finally {
@@ -349,11 +390,11 @@ el.dlPdf.addEventListener("click", async () => {
 });
 el.dlTxt.addEventListener("click", () => {
   if (!lastResult) return;
-  downloadBlob(buildTxtBlob(lastResult.translated), `${lastResult.stem}.ar.txt`);
+  downloadBlob(buildTxtBlob(lastResult.translated), `${lastResult.stem}.${lastResult.tgt}.txt`);
 });
 el.dlPrint.addEventListener("click", () => {
   if (!lastResult) return;
-  if (!openPrintView(lastResult.translated, lastResult.stem)) {
+  if (!openPrintView(lastResult.translated, lastResult.stem, lastResult.tgt)) {
     showToast("Your browser blocked the print window — allow pop-ups for this site and try again.");
   }
 });

@@ -93,6 +93,13 @@ export class ProgressStore {
   }
 }
 
+/** How many saved translation jobs (any pair) exist for the text with fingerprint `fp`. */
+export async function translationJobsFor(fp) {
+  const db = await openDb();
+  const rows = await reqPromise(tx(db, "headers", "readonly").getAll());
+  return rows.filter((r) => String(r.id).startsWith("tr:") && r.header && r.header.fingerprint === fp).length;
+}
+
 // ------------------------------------------------------------- fingerprints
 
 async function sha256Hex(bytes) {

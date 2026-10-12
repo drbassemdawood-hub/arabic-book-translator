@@ -71,7 +71,7 @@ function sse(text) {
 function makeMock() {
   const state = {
     translateCalls: 0, reviewCalls: 0, ocrCalls: 0, countTokensCalls: 0,
-    sources: [], delayMs: 100,
+    sources: [], systems: [], reviewSystems: [], ocrSystems: [], delayMs: 100,
   };
   state.handler = async (route) => {
     const req = route.request();
@@ -104,33 +104,67 @@ function makeMock() {
 
     if (Array.isArray(content) && content.some((b) => b.type === "image")) {
       state.ocrCalls++;
+      state.ocrSystems.push(body.system?.[0]?.text || "");
+      const arabicBook = (body.system?.[0]?.text || "").includes("written in Arabic");
       await route.fulfill({
         status: 200, headers: cors, contentType: "text/event-stream",
-        body: sse(`Scanned page mock text number ${state.ocrCalls}. It reads like a real page.`),
+        body: sse(arabicBook
+          ? `صفحة ممسوحة تجريبية رقم ${state.ocrCalls}. تُقرأ مثل صفحة حقيقية.`
+          : `Scanned page mock text number ${state.ocrCalls}. It reads like a real page.`),
       });
       return;
     }
 
-    const isReview = (body.system?.[0]?.text || "").includes("bilingual editor");
-    if (isReview) state.reviewCalls++;
-    else {
+    const system = body.system?.[0]?.text || "";
+    const isReview = system.includes("bilingual editor");
+    if (isReview) {
+      state.reviewCalls++;
+      state.reviewSystems.push(system);
+    } else {
       state.translateCalls++;
       state.sources.push(String(content));
+      state.systems.push(system);
     }
-    // Arabic output with the same paragraph count as the source passage
-    const passage = String(content).split(/Translate (?:ONLY the following passage|this passage):\n\n/).pop();
+    // output in the requested target language, same paragraph count as the source passage
+    const tgt = targetOf(system);
+    const passage = isReview
+      ? String(content).split(/DRAFT [A-Z]+ TRANSLATION:\n\n/).pop()
+      : String(content).split(/Translate (?:ONLY the following passage|this passage):\n\n/).pop();
     const nPars = passage.split("\n\n").filter((p) => p.trim()).length || 1;
-    const arabic = Array.from({ length: nPars }, (_, i) =>
-      i === 1
-        ? `فقرة مترجمة رقم ${i + 1} فيها اسم أجنبي Baker Street 221 وسط النص العربي.`
-        : `فقرة مترجمة رقم ${i + 1} — نصٌ عربيّ تجريبي.`).join("\n\n");
+    const out = Array.from({ length: nPars }, (_, i) => OUT_TEXT[tgt](i)).join("\n\n");
     await route.fulfill({
       status: 200, headers: cors, contentType: "text/event-stream",
-      body: sse(isReview ? `${arabic} (مراجَعة)` : arabic),
+      body: sse(isReview ? `${out}${REVIEW_SUFFIX[tgt]}` : out),
     });
   };
   return state;
 }
+
+/** Which language the system prompt asks for. */
+function targetOf(system) {
+  const m = system.match(/book into ([^.\n]+)/) || system.match(/reviewing an? (\w+) translation/);
+  const name = m ? m[1] : "Arabic";
+  if (/Chinese/.test(name)) return "zh";
+  if (/Ukrainian/.test(name)) return "uk";
+  if (/German/.test(name)) return "de";
+  if (/English/.test(name)) return "en";
+  return "ar";
+}
+
+// mock translations (original test sentences); paragraph 2 of each mixes scripts
+const OUT_TEXT = {
+  ar: (i) => (i === 1
+    ? `فقرة مترجمة رقم ${i + 1} فيها اسم أجنبي Baker Street 221 وسط النص العربي.`
+    : `فقرة مترجمة رقم ${i + 1} — نصٌ عربيّ تجريبي.`),
+  en: (i) => (i === 1
+    ? `Translated paragraph ${i + 1} keeps the Arabic word صبر inside an English sentence.`
+    : `Translated paragraph ${i + 1} — a plain English test sentence.`),
+  uk: (i) => `Перекладений абзац ${i + 1} — український текст із літерами ї, є, ґ та словом м’ята.`,
+  zh: (i) => `这是第${i + 1}段译文，包含中文标点符号：逗号、句号，以及英文名称 Baker Street 221。` +
+    (i === 1 ? "为了测试自动换行，这一段特意写得很长很长，".repeat(6) + "到此结束。" : ""),
+  de: (i) => `Übersetzter Absatz ${i + 1} — mit „Anführungszeichen“, Umlauten äöü und dem Buchstaben ß.`,
+};
+const REVIEW_SUFFIX = { ar: " (مراجَعة)", en: " (reviewed)", uk: " (перевірено)", zh: "（已校对）", de: " (geprüft)" };
 
 // ------------------------------------------------------------------ helpers
 
@@ -143,10 +177,11 @@ async function newPage(browser, mock) {
   return { context, page };
 }
 
-async function setup(page, file, { review = false, txt = false, pdf = false, speed = null } = {}) {
+async function setup(page, file, { review = false, txt = false, pdf = false, speed = null, pair = null } = {}) {
   await page.click("#open-key");
   await page.fill("#api-key", "sk-ant-mock-key");
   await page.click("#key-save");
+  if (pair) await page.selectOption("#pair", pair);
   await page.setInputFiles("#file-input", file);
   if (!review) await page.uncheck("#review");
   else await page.check("#review");
@@ -174,8 +209,40 @@ async function idbCounts(page) {
   }));
 }
 
-const browser = await chromium.launch().catch(() =>
-  chromium.launch({ executablePath: "/opt/pw-browsers/chromium" }));
+// Playwright's own Chromium if installed, else Edge/Chrome already on the machine
+async function launchBrowser() {
+  for (const opts of [{}, { channel: "msedge" }, { channel: "chrome" },
+                      { executablePath: "/opt/pw-browsers/chromium" }]) {
+    try {
+      return await chromium.launch(opts);
+    } catch { /* try the next one */ }
+  }
+  throw new Error("No Chromium-based browser available for the tests.");
+}
+async function idbHeaderIds(page) {
+  return page.evaluate(() => new Promise((resolve) => {
+    const req = indexedDB.open("book-translator");
+    req.onsuccess = () => {
+      const db = req.result;
+      const r = db.transaction("headers", "readonly").objectStore("headers").getAllKeys();
+      r.onsuccess = () => { db.close(); resolve(r.result); };
+    };
+    req.onerror = () => resolve([]);
+  }));
+}
+
+const browser = await launchBrowser();
+
+// A correct digital Arabic PDF, printed by the browser from the sample HTML
+// (PyMuPDF's own Arabic PDF has a corrupted character map — kept as the
+// corrupted-text-layer fixture).
+for (const name of ["sample_ar", "sample_en_quotes"]) {
+  const p = await browser.newPage();
+  await p.goto(`http://localhost:${PORT}/test/samples/${name}.html`);
+  await p.evaluate(() => document.fonts.ready);
+  await p.pdf({ path: join(SAMPLES, `${name}.pdf`), format: "A4" });
+  await p.close();
+}
 
 // ====================================================== flow 0: key modal UX
 console.log("\nFlow 0 — API key lives in a modal, not on the page");
@@ -266,7 +333,7 @@ console.log("\nFlow 3 — scanned PDF → Claude vision OCR");
   await page.click("#start-btn");
   await doneLog(page);
   const log = await page.textContent("#log");
-  check("scanned pages detected", /2 of 3 pages have no text layer/.test(log), log.split("\n")[2]);
+  check("scanned pages detected", /2 of 3 pages need OCR/.test(log), log.split("\n")[2]);
   check("OCR cost estimate shown", /vision OCR of 2 pages ≈ \$/.test(log));
   check("two OCR vision calls", mock.ocrCalls === 2, `got ${mock.ocrCalls}`);
   const allSources = mock.sources.join("\n");
@@ -301,6 +368,9 @@ console.log("\nFlow 4 — cancel mid-run, then resume without re-paying");
   const callsBefore = mock.translateCalls;
   const counts = await idbCounts(page);
   check("progress persisted on cancel", counts.records >= 2, JSON.stringify(counts));
+  const keys = await idbHeaderIds(page);
+  check("English→Arabic keeps its pre-language-pairs key (old runs still resume)",
+    keys.length === 1 && /^tr:[0-9a-f]{16}$/.test(keys[0]), JSON.stringify(keys));
 
   await page.click("#start-btn");
   await page.waitForSelector("#resume-modal", { state: "visible", timeout: 15000 });
@@ -366,6 +436,255 @@ console.log("\nFlow 6 — invalid API key shows the friendly desktop message");
     null, { timeout: 20000 });
   check("friendly auth error", true);
   check("start re-enabled after failure", !(await page.isDisabled("#start-btn")));
+  await context.close();
+}
+
+// ====================================================== language pairs
+const MARKERS = {
+  en: MARKER,
+  ar: "عاد الصقر الذهبي عند الفجر.",
+  zh: "金色的猎鹰在黎明时分归来。",
+  uk: "Золотий сокіл повернувся на світанку.",
+  de: "Der goldene Falke kehrte im Morgengrauen zurück.",
+};
+const NAMES = { en: "English", ar: "Arabic", zh: "Chinese", uk: "Ukrainian", de: "German" };
+const PAIRS = ["en-ar", "ar-en", "ar-uk", "uk-ar", "ar-zh", "zh-ar", "ar-de", "de-ar"];
+
+console.log("\nFlow 7 — every language pair: PDF in the source language → Word + PDF + text in the target");
+{
+  const { context, page } = await newPage(browser, makeMock());
+  const options = await page.$$eval("#pair option", (os) => os.map((o) => [o.value, o.textContent]));
+  check("menu offers exactly the 8 directions",
+    JSON.stringify(options.map(([v]) => v)) === JSON.stringify(PAIRS), JSON.stringify(options));
+  check("menu labels read naturally", options.some(([v, t]) => v === "ar-zh" && t === "Arabic → Chinese (Mandarin)"));
+  check("English → Arabic is the default", (await page.inputValue("#pair")) === "en-ar");
+  await context.close();
+}
+for (const pair of PAIRS) {
+  const [src, tgt] = pair.split("-");
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  const sample = src === "en" ? "sample.pdf" : `sample_${src}.pdf`;
+  await setup(page, join(SAMPLES, sample), { pair, review: true, txt: true, pdf: true });
+  const downloads = [];
+  page.on("download", (d) => downloads.push(d));
+  await page.click("#start-btn");
+  await doneLog(page);
+  await page.waitForTimeout(3000); // PDF build + downloads (the Chinese font is ~3 MB)
+
+  const log = await page.textContent("#log");
+  check(`${pair}: translate prompt is ${NAMES[src]} → ${NAMES[tgt]}`,
+    mock.systems.length > 0 && mock.systems.every((s) => s.includes(`${NAMES[src]} book into`) && s.includes(NAMES[tgt])),
+    mock.systems[0]?.split("\n")[0]);
+  check(`${pair}: review pass ran with matching labels`,
+    mock.reviewCalls >= 1 && mock.reviewSystems.every((s) => s.includes(`${NAMES[src]} source`)));
+  check(`${pair}: source marker extracted from the PDF`,
+    mock.sources.join("\n").includes(MARKERS[src]),
+    mock.sources.join("\n").slice(0, 300).replace(/\n/g, " ⏎ "));
+  check(`${pair}: no false language warning`, !/looks like/.test(log));
+  check(`${pair}: no missing-glyph warning in the PDF`, !/no glyph/.test(log), log.split("\n").filter((l) => /glyph/.test(l)).join(" | "));
+  const names = downloads.map((d) => d.suggestedFilename());
+  check(`${pair}: downloads named .${tgt}.docx/.pdf/.txt`,
+    ["docx", "pdf", "txt"].every((ext) => names.some((n) => n.endsWith(`.${tgt}.${ext}`))), JSON.stringify(names));
+  for (const d of downloads) {
+    const ext = d.suggestedFilename().split(".").pop();
+    await d.saveAs(join(ARTIFACTS, `pair-${pair}.${ext}`));
+  }
+  // print view direction follows the target language
+  const [popup] = await Promise.all([context.waitForEvent("page"), page.click("#dl-print")]);
+  await popup.waitForLoadState("domcontentloaded");
+  const dir = await popup.getAttribute("html", "dir");
+  check(`${pair}: print view is ${tgt === "ar" ? "rtl" : "ltr"}`, dir === (tgt === "ar" ? "rtl" : "ltr"), dir);
+  await popup.close();
+  await context.close();
+}
+
+console.log("\nFlow 8 — legacy-encoded .txt and .docx books in other languages");
+for (const [file, pair] of [["sample_ar_legacy.txt", "ar-en"], ["sample_zh_legacy.txt", "zh-ar"],
+                            ["sample_uk_legacy.txt", "uk-ar"], ["sample_ar.docx", "ar-de"],
+                            ["sample_zh.docx", "zh-ar"], ["sample_de.txt", "de-ar"]]) {
+  const src = pair.split("-")[0];
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, file), { pair });
+  await page.click("#start-btn");
+  await doneLog(page);
+  check(`${file}: decoded and extracted (marker found)`, mock.sources.join("\n").includes(MARKERS[src]));
+  await context.close();
+}
+
+console.log("\nFlow 9 — wrong language pair is caught BEFORE any paid request");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample.txt"), { pair: "ar-en" }); // an English book, "Arabic → English"
+  await page.click("#start-btn");
+  await page.waitForSelector("#lang-modal", { state: "visible", timeout: 15000 });
+  check("mismatch dialog names the real language", (await page.textContent("#lang-text")).includes("looks like English"));
+  await page.click("#lang-no");
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Stopped before translating"),
+    null, { timeout: 15000 });
+  check("stopping costs nothing (no translate / token-count calls)",
+    mock.translateCalls === 0 && mock.countTokensCalls === 0, `translate=${mock.translateCalls} count=${mock.countTokensCalls}`);
+  check("start re-enabled after stopping", !(await page.isDisabled("#start-btn")));
+  // and "Translate anyway" proceeds
+  await page.click("#start-btn");
+  await page.waitForSelector("#lang-modal", { state: "visible", timeout: 15000 });
+  await page.click("#lang-yes");
+  await doneLog(page);
+  check("'Translate anyway' completes the run", mock.translateCalls >= 1);
+  await context.close();
+}
+
+console.log("\nFlow 10 — Arabic PDF with a corrupted text layer is read with OCR");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_ar_garbled.pdf"), { pair: "ar-en" });
+  await page.click("#start-btn");
+  await doneLog(page);
+  const log = await page.textContent("#log");
+  check("corrupted text layer detected", /2 of 2 pages have a corrupted text layer/.test(log),
+    log.split("\n").slice(0, 4).join(" | "));
+  check("both pages sent to OCR", mock.ocrCalls === 2, `got ${mock.ocrCalls}`);
+  check("OCR told the book is Arabic", mock.ocrSystems.every((s) => s.includes("written in Arabic")));
+  check("OCR text (not gibberish) was translated", mock.sources.join("\n").includes("صفحة ممسوحة تجريبية") &&
+    !/[܀-ݏঀ-৿]/.test(mock.sources.join("\n")));
+  await context.close();
+}
+
+console.log("\nFlow 11 — progress is kept per language pair; the choice is remembered");
+{
+  const big = Array.from({ length: 900 },
+    (_, i) => `Абзац номер ${i}. Він має кілька речень. Вони заповнюють місце.`).join("\n\n");
+  const bigPath = join(ARTIFACTS, "big_uk.txt");
+  writeFileSync(bigPath, big);
+  const mock = makeMock();
+  mock.delayMs = 250;
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, bigPath, { pair: "uk-ar" });
+  await page.click("#start-btn");
+  await page.waitForFunction(
+    () => /^1\/\d+ passages/.test(document.getElementById("status-text").textContent), null, { timeout: 30000 });
+  await page.click("#cancel-btn");
+  await page.waitForFunction(
+    () => document.getElementById("log").textContent.includes("Cancelled. Progress saved"), null, { timeout: 30000 });
+  const keys = await idbHeaderIds(page);
+  check("progress key carries the pair", keys.some((k) => /^tr:[0-9a-f]{16}:uk-ar$/.test(k)), JSON.stringify(keys));
+  await page.reload();
+  check("pair choice remembered after reload", (await page.inputValue("#pair")) === "uk-ar");
+  await context.close();
+}
+
+console.log("\nFlow 12 — wrong pair on a GOOD Arabic PDF: dialog first, zero OCR / translation spend");
+for (const ocrOff of [false, true]) {
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_ar.pdf"), { pair: "en-ar" }); // the default pair, an Arabic book
+  if (ocrOff) await page.selectOption("#ocr", { index: 1 });
+  await page.click("#start-btn");
+  await page.waitForSelector("#lang-modal", { state: "visible", timeout: 15000 });
+  const label = ocrOff ? "OCR off" : "OCR on";
+  check(`${label}: dialog says the book looks like Arabic`, (await page.textContent("#lang-text")).includes("looks like Arabic"));
+  check(`${label}: no OCR paid before the dialog`, mock.ocrCalls === 0, `ocr=${mock.ocrCalls}`);
+  await page.click("#lang-no");
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Stopped before translating"),
+    null, { timeout: 15000 });
+  check(`${label}: stopping costs nothing at all`,
+    mock.ocrCalls + mock.translateCalls + mock.countTokensCalls === 0,
+    `ocr=${mock.ocrCalls} translate=${mock.translateCalls} count=${mock.countTokensCalls}`);
+  check(`${label}: no misleading 'corrupted text layer' message`,
+    !/corrupted text layer/.test(await page.textContent("#log")));
+  await context.close();
+}
+
+console.log("\nFlow 13 — legacy encodings are detected, not guessed");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_zh_big5.txt"), { pair: "zh-ar" });
+  await page.click("#start-btn");
+  await doneLog(page);
+  check("Big5 Traditional Chinese book decoded correctly", mock.sources.join("\n").includes("金色的獵鷹在黎明時分歸來。"));
+  await context.close();
+}
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_ar_legacy.txt"), { pair: "en-ar" }); // old-encoding Arabic, wrong pair
+  await page.click("#start-btn");
+  await page.waitForSelector("#lang-modal", { state: "visible", timeout: 15000 });
+  check("old-encoding Arabic .txt under the wrong pair: dialog names Arabic (not 'German')",
+    (await page.textContent("#lang-text")).includes("looks like Arabic"), await page.textContent("#lang-text"));
+  await page.click("#lang-no");
+  await context.close();
+}
+
+console.log("\nFlow 14 — English PDF quoting Arabic: no OCR, text layer used (English → Arabic regression)");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_en_quotes.pdf"), { pair: "en-ar" });
+  await page.click("#start-btn");
+  await doneLog(page);
+  const log = await page.textContent("#log");
+  check("no page sent to OCR", mock.ocrCalls === 0, `ocr=${mock.ocrCalls}`);
+  check("no 'corrupted text layer' message", !/corrupted text layer/.test(log));
+  check("no language warning", !/looks like/.test(log));
+  check("English text and the Arabic quotation both reached the translator",
+    mock.sources.join("\n").includes(MARKER) && mock.sources.join("\n").includes("وقفت المكتبة القديمة"));
+  await context.close();
+}
+
+console.log("\nFlow 15 — scanned Arabic book with one English notice page: no false warning before OCR");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_ar_scan_notice.pdf"), { pair: "ar-en" });
+  await page.click("#start-btn");
+  const modal = page.waitForSelector("#lang-modal", { state: "visible", timeout: 60000 }).then(() => "modal");
+  const outcome = await Promise.race([doneLog(page).then(() => "done"), modal.catch(() => "none")]);
+  check("no language dialog — the notice page does not decide the book's language", outcome === "done", outcome);
+  if (outcome === "modal") await page.click("#lang-no");
+  else {
+    const log = await page.textContent("#log");
+    check("all 6 scanned pages read with OCR", mock.ocrCalls === 6, `ocr=${mock.ocrCalls}`);
+    check("no language warning at all", !/looks like/.test(log));
+  }
+  await context.close();
+}
+
+console.log("\nFlow 16 — mostly digital English PDF under Arabic → English: caught before any OCR is paid");
+{
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, "sample_en_mostly_digital.pdf"), { pair: "ar-en" });
+  await page.click("#start-btn");
+  await page.waitForSelector("#lang-modal", { state: "visible", timeout: 30000 });
+  check("dialog says the book looks like English", (await page.textContent("#lang-text")).includes("looks like English"));
+  check("no OCR paid before the dialog", mock.ocrCalls === 0, `ocr=${mock.ocrCalls}`);
+  await page.click("#lang-no");
+  await context.close();
+}
+
+console.log("\nFlow 17 — one religious convention per book, in every passage and in the review");
+for (const [file, pair, want, logWant] of [
+  ["sample_ar_islamic.txt", "ar-en", "render الله as \"Allah\" everywhere", "Islamic religious work"],
+  ["sample_ar.txt", "ar-de", "Render الله as „Gott“ everywhere", "rendered the same way throughout"],
+]) {
+  const mock = makeMock();
+  const { context, page } = await newPage(browser, mock);
+  await setup(page, join(SAMPLES, file), { pair, review: true });
+  await page.click("#start-btn");
+  await doneLog(page);
+  const log = await page.textContent("#log");
+  check(`${file} (${pair}): marker translated`, mock.sources.join("\n").includes(MARKERS.ar));
+  check(`${file} (${pair}): every translate prompt carries the book's convention`,
+    mock.systems.length > 0 && mock.systems.every((s) => s.includes(want)), mock.systems[0]?.slice(0, 80));
+  check(`${file} (${pair}): every review prompt enforces it`,
+    mock.reviewSystems.length > 0 && mock.reviewSystems.every((s) =>
+      s.split("\n").some((l) => l.startsWith("- violations of this rule:") && l.includes(want))));
+  check(`${file} (${pair}): the choice is logged`, log.includes(logWant), log.split("\n").slice(0, 6).join(" | "));
   await context.close();
 }
 

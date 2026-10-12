@@ -25,7 +25,11 @@ const VENDOR = [
   ["node_modules/jspdf/dist/jspdf.umd.min.js", "jspdf.umd.min.js"],
   ["node_modules/bidi-js/dist/bidi.min.mjs", "bidi.min.mjs"],
   ["node_modules/arabic-reshaper/index.js", "arabic-reshaper.js"],
-  ["vendor/Amiri-Regular.ttf", "Amiri-Regular.ttf"], // committed (SIL OFL)
+  // PDF fonts — committed (SIL OFL); the Noto files are built by tools/make_fonts.py
+  ["vendor/Amiri-Regular.ttf", "Amiri-Regular.ttf"],
+  ["vendor/NotoSerif-Regular.ttf", "NotoSerif-Regular.ttf"],
+  ["vendor/NotoSerifSC-Regular.ttf", "NotoSerifSC-Regular.ttf"],
+  ["vendor/FONTS-LICENSE.txt", "FONTS-LICENSE.txt"],
 ];
 for (const [src, name] of VENDOR) {
   const from = existsSync(join(ROOT, src)) ? join(ROOT, src) : join(ROOT, "vendor", name);

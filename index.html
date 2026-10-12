@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Book Translator — مترجم الكتب | English books → Arabic</title>
-<meta name="description" content="Translate whole English books (.txt, .docx, .epub, .pdf) into Modern Standard Arabic with your own Claude API key. Runs entirely in your browser — resumable, with Word and PDF output.">
+<title>Book Translator — مترجم الكتب | Arabic ⇄ English · Ukrainian · Chinese · German</title>
+<meta name="description" content="Translate whole books (.txt, .docx, .epub, .pdf) between Arabic and English, Ukrainian, Chinese (Mandarin) or German with your own Claude API key. Runs entirely in your browser — resumable, with Word and PDF output.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,8 +21,8 @@
       <p class="hero-arabic" lang="ar" dir="rtl">مُترجِم الكُتُب</p>
     </div>
     <p class="hero-sub">
-      Translate whole English books into elegant Modern Standard Arabic
-      (<span lang="ar" dir="rtl">الفصحى</span>) — right here in your browser.
+      Translate whole books between Arabic (<span lang="ar" dir="rtl">الفصحى</span>) and
+      English, Ukrainian, Chinese (Mandarin) or German — right here in your browser.
     </p>
     <p class="hero-privacy">
       🔒 Private by design: your API key and your book go straight from this page to Anthropic.
@@ -52,6 +52,12 @@
           <button type="button" class="ghost-btn" id="clear-file" title="Remove file">✕</button>
         </div>
       </div>
+    </div>
+
+    <!-- language direction -->
+    <div class="field">
+      <label for="pair">Translate</label>
+      <select id="pair"></select>
     </div>
 
     <!-- options -->
@@ -122,15 +128,19 @@
   <section class="notes">
     <h2>How it works</h2>
     <ul>
+      <li><strong>Eight directions:</strong> English → Arabic, Arabic → English, Arabic ⇄ Ukrainian,
+        Arabic ⇄ Chinese (Mandarin, Simplified characters) and Arabic ⇄ German. If the book doesn't look like
+        the language you chose, the app asks before spending anything.</li>
       <li><strong>Costs come from your own Anthropic account.</strong> Before translating, the log shows an
-        estimated cost and time for the whole book. Rough guide with default settings (Opus, two-pass review):
-        a 300-page book ≈ $15–25; a 2000-page book ≈ $100–170. Turn off the review pass or choose Sonnet to cut this substantially.</li>
+        estimated cost and time for the whole book. Rough guide for English → Arabic with default settings
+        (Opus, two-pass review): a 300-page book ≈ $15–25; a 2000-page book ≈ $100–170. Other directions are
+        in the same range. Turn off the review pass or choose Sonnet to cut this substantially.</li>
       <li><strong>Interruptions never lose paid work.</strong> Progress is saved in your browser after every passage.
         If you cancel, lose connection, or close the tab — press Start again with the same book and it resumes.</li>
       <li><strong>Scanned PDFs</strong> (no text layer) are detected automatically and read with Claude vision OCR;
         the estimated OCR cost is shown first, and results are cached per page.</li>
-      <li><strong>Careful speed</strong> translates one passage at a time, feeding each passage the previous Arabic
-        text — best consistency of names and style. Fast/Fastest run 3 or 6 passages in parallel
+      <li><strong>Careful speed</strong> translates one passage at a time, feeding each passage the previous
+        translated text — best consistency of names and style. Fast/Fastest run 3 or 6 passages in parallel
         (needs an API rate-limit tier that allows it).</li>
       <li>Translated books are for your personal use — respect the copyright of the original work.</li>
     </ul>
@@ -171,6 +181,18 @@
     <div class="row end">
       <button type="button" class="secondary-btn" id="resume-no">Start over</button>
       <button type="button" class="primary-btn" id="resume-yes">Resume</button>
+    </div>
+  </div>
+</div>
+
+<!-- language mismatch modal -->
+<div class="modal-backdrop" id="lang-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="lang-title">
+    <h3 id="lang-title">⚠ Check the language</h3>
+    <p id="lang-text"></p>
+    <div class="row end">
+      <button type="button" class="secondary-btn" id="lang-yes">Translate anyway</button>
+      <button type="button" class="primary-btn" id="lang-no">Stop — I'll fix it</button>
     </div>
   </div>
 </div>

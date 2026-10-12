@@ -3,6 +3,8 @@
 // (test/gen_artext_oracle.py must have produced /tmp/artext_oracle.json first)
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makeArabicLayout } from "../js/artext.js";
 
 const require = createRequire(import.meta.url);
@@ -15,7 +17,7 @@ const layout = makeArabicLayout({
   measure: (s) => s.length, // measurement irrelevant for single-line parity
 });
 
-const cases = JSON.parse(readFileSync("/tmp/artext_oracle.json", "utf-8"));
+const cases = JSON.parse(readFileSync(join(tmpdir(), "artext_oracle.json"), "utf-8"));
 let ok = 0;
 let known = 0;
 const failures = [];
